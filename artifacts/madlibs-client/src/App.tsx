@@ -1,21 +1,20 @@
 import { type FormEvent, type ReactNode, useEffect, useRef, useState } from 'react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import {
+  apiError,
+  useGamePoll,
   useGetConfig,
   useJoinGame,
-  usePollGame,
   useSubmitWord,
   type PlayerCredentials,
-  type PollResponse,
   type RoundPart,
   type Stats,
-} from '@workspace/api-client-react';
+} from '@/api/game';
 import { ErrorBoundary } from '@/components/error-boundary';
 import { Toaster } from '@/components/ui/toaster';
 import { TooltipProvider } from '@/components/ui/tooltip';
 
 const queryClient = new QueryClient();
-const POLL_MS = 1000;
 const NAME_STORAGE_KEY = 'madlibs-display-name';
 const TOKEN_STORAGE_KEY = 'madlibs-join-code';
 const SERVER_STORAGE_KEY = 'madlibs-server-url';
@@ -56,25 +55,6 @@ function appendHistory(entry: PlayedWord): PlayedWord[] {
   const words = [...readHistory(), entry].slice(-50);
   window.localStorage.setItem(HISTORY_STORAGE_KEY, JSON.stringify(words));
   return words;
-}
-
-function apiError(error: unknown, fallback: string) {
-  if (typeof error === 'string') return error;
-  if (error && typeof error === 'object') {
-    const record = error as {
-      data?: { error?: string };
-      response?: { data?: { error?: string } };
-      message?: string;
-    };
-    return record.data?.error || record.response?.data?.error || record.message || fallback;
-  }
-  return fallback;
-}
-
-function apiStatus(error: unknown) {
-  if (!error || typeof error !== 'object') return undefined;
-  const record = error as { status?: number; response?: { status?: number } };
-  return record.status || record.response?.status;
 }
 
 function makePlayerKey() {
@@ -171,20 +151,17 @@ function JoinScreen({ onJoined }: { onJoined: (result: { name: string }) => void
       gameServerUrl: gameServerUrl.trim(),
       playerKey: makePlayerKey(),
     };
-    joinGame.mutate(
-      { data: credentials },
-      {
-        onSuccess: (result) => {
-          if (!result.ok || !result.player) {
-            setFormError('The game server did not accept the join request. Check the join code and try again.');
-            return;
-          }
-          setCredentials(credentials);
-          onJoined({ name: result.player.displayName });
-        },
-        onError: (error) => setFormError(apiError(error, 'The game server could not be reached. Check the address and try again.')),
+    joinGame.join(credentials, {
+      onSuccess: (result) => {
+        if (!result.ok || !result.player) {
+          setFormError('The game server did not accept the join request. Check the join code and try again.');
+          return;
+        }
+        setCredentials(credentials);
+        onJoined({ name: result.player.displayName });
       },
-    );
+      onError: (error) => setFormError(apiError(error, 'The game server could not be reached. Check the address and try again.')),
+    });
   }
 
   return (
@@ -229,7 +206,7 @@ function JoinScreen({ onJoined }: { onJoined: (result: { name: string }) => void
               <span className="mb-2 block text-sm font-bold">Join code</span>
               <input
                 value={token}
-           onChange={(event) => setToken(event.target.value.toUpperCase())}
+                onChange={(event) => setToken(event.target.value.toUpperCase())}
                 placeholder="e.g. CANDLE-7"
                 autoComplete="off"
                 data-testid="input-join-code"
@@ -256,7 +233,7 @@ function JoinScreen({ onJoined }: { onJoined: (result: { name: string }) => void
               <input
                 value={gameServerUrl}
                 onChange={(event) => setGameServerUrl(event.target.value)}
-                 placeholder="Enter the game server address"
+                placeholder="Enter the game server address"
                 type="url"
                 data-testid="input-server-url"
                 className="focus-ring h-14 w-full rounded-2xl border border-input bg-background px-4 text-sm outline-none placeholder:text-muted-foreground/70"
@@ -272,7 +249,7 @@ function JoinScreen({ onJoined }: { onJoined: (result: { name: string }) => void
 
           <button
             type="submit"
-             disabled={!isReady || joinGame.isPending}
+            disabled={!isReady || joinGame.isPending}
             data-testid="button-join-game"
             className="focus-ring mt-6 flex h-14 w-full items-center justify-between rounded-2xl bg-primary px-5 text-left font-extrabold text-primary-foreground shadow-sm disabled:cursor-not-allowed disabled:opacity-60"
           >
@@ -356,64 +333,19 @@ function GameScreen({
   onEdit: () => void;
   onSessionEnded: () => void;
 }) {
-  const pollGame = usePollGame();
   const submitWord = useSubmitWord();
+  const { poll, failure, retry, refresh, credentials } = useGamePoll({
+    getCredentials,
+    onSessionEnded,
+  });
   const [recentWords, setRecentWords] = useState<PlayedWord[]>(() => readHistory());
   const [word, setWord] = useState('');
   const [clock, setClock] = useState(Date.now());
-  const [lastPollFailure, setLastPollFailure] = useState<{ message: string; status?: number } | null>(null);
-  const credentialsRef = useRef(getCredentials());
-  const pollRef = useRef(pollGame.mutateAsync);
-  const submitRef = useRef(submitWord.mutate);
-  const onSessionEndedRef = useRef(onSessionEnded);
-  const [poll, setPoll] = useState<PollResponse | undefined>();
   const previousRoundId = useRef<string | null>(null);
-
-  pollRef.current = pollGame.mutateAsync;
-  submitRef.current = submitWord.mutate;
-  onSessionEndedRef.current = onSessionEnded;
 
   useEffect(() => {
     const tick = window.setInterval(() => setClock(Date.now()), 250);
     return () => window.clearInterval(tick);
-  }, []);
-
-  useEffect(() => {
-    const credentials = credentialsRef.current;
-    if (!credentials) {
-      onSessionEndedRef.current();
-      return;
-    }
-
-    // Schedule the next poll only once the previous one settles, so a slow
-    // request cannot stack another on top of it. Drive the loop off the awaited
-    // promise, not react-query's per-call callbacks: a mutation hook keeps one
-    // options slot, so any other poll call would replace this one's onSettled
-    // and the loop would never reschedule.
-    let timer = 0;
-    let stopped = false;
-
-    const request = async () => {
-      try {
-        const result = await pollRef.current({ data: credentials });
-        setPoll(result);
-        if (!result.ok) {
-          setLastPollFailure({ message: result.error || 'The game server returned an invalid state.' });
-        } else {
-          setLastPollFailure(null);
-        }
-      } catch (error) {
-        setLastPollFailure({ message: apiError(error, 'The game server is unreachable.'), status: apiStatus(error) });
-      } finally {
-        if (!stopped) timer = window.setTimeout(request, POLL_MS);
-      }
-    };
-
-    void request();
-    return () => {
-      stopped = true;
-      window.clearTimeout(timer);
-    };
   }, []);
 
   const you = poll?.you;
@@ -431,8 +363,8 @@ function GameScreen({
     }
   }, [round?.roundId, submitWord]);
 
-  if (lastPollFailure) {
-    const mayBeToken = lastPollFailure.status === 403 || /token|join code|stale|code/i.test(lastPollFailure.message);
+  if (failure) {
+    const mayBeToken = failure.status === 403 || /token|join code|stale|code/i.test(failure.message);
     return (
       <Shell>
         <BrandBar joinedName={name} onEdit={onEdit} />
@@ -440,22 +372,13 @@ function GameScreen({
           <p className="text-xs font-extrabold uppercase tracking-[0.14em] text-destructive">Could not update the game</p>
           <h1 className="display-face mt-3 text-3xl font-extrabold sm:text-4xl">The game server sent an error.</h1>
           <p data-testid="status-poll-error" role="alert" className="mt-4 rounded-2xl bg-destructive/5 px-4 py-3 text-base font-semibold leading-7 text-destructive">
-            {lastPollFailure.message}
+            {failure.message}
           </p>
           {mayBeToken ? <p className="mt-5 text-sm leading-6 text-muted-foreground">The join code may have changed — re-enter it to join again.</p> : null}
           <div className="mt-7 flex flex-col gap-3 sm:flex-row">
             <button
               type="button"
-              onClick={() => {
-                const credentials = credentialsRef.current;
-                if (!credentials) return;
-                void pollRef.current({ data: credentials })
-                  .then((result) => {
-                    setPoll(result);
-                    if (result.ok) setLastPollFailure(null);
-                  })
-                  .catch(() => {});
-              }}
+              onClick={retry}
               className="focus-ring h-12 rounded-2xl bg-primary px-5 font-extrabold text-primary-foreground"
               data-testid="button-retry-poll"
             >
@@ -470,11 +393,10 @@ function GameScreen({
 
   function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const credentials = credentialsRef.current;
     if (!canSubmit || !credentials) return;
     const played = word.trim();
-    submitRef.current(
-      { data: { ...credentials, word: played } },
+    submitWord.submit(
+      { ...credentials, word: played },
       {
         onSuccess: (result) => {
           if (!result.ok) return;
@@ -486,7 +408,7 @@ function GameScreen({
               at: Date.now(),
             }),
           );
-          void pollRef.current({ data: credentials }).then(setPoll).catch(() => {});
+          refresh();
         },
       },
     );
