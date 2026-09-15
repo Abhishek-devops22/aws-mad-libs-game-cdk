@@ -1,25 +1,40 @@
 // The only place the UI touches the API transport. Components import from here,
-// never from '@workspace/api-client-react' directly, so swapping the transport
-// (generated hooks, AWS Blocks, plain fetch) is a single-file change.
-//
-// This layer also absorbs the generated `{ data: payload }` call convention:
-// everything exported below takes the payload directly.
+// so swapping from the generated orval client to AWS Blocks is a single-file change.
 import { useCallback, useEffect, useRef, useState } from 'react';
-import {
-  useGetConfig as useGeneratedGetConfig,
-  useJoinGame as useGeneratedJoinGame,
-  usePollGame as useGeneratedPollGame,
-  useSubmitWord as useGeneratedSubmitWord,
-  type JoinResponse,
-  type PlayerCredentials,
-  type PollResponse,
-  type RoundPart,
-  type Stats,
-  type SubmitInput,
-  type SubmitResponse,
-} from '@workspace/api-client-react';
+import { useMutation, useQuery } from '@tanstack/react-query';
+import { api } from 'aws-blocks';
 
-export type { PlayerCredentials, PollResponse, RoundPart, Stats, SubmitInput };
+// ---------------------------------------------------------------------------
+// Re-exported types  — extracted from the aws-blocks api method signatures so
+// that components can stay typed without importing aws-blocks directly.
+// ---------------------------------------------------------------------------
+
+export type PlayerCredentials = {
+  token: string;
+  displayName: string;
+  playerKey: string;
+  gameServerUrl: string;
+};
+
+export type SubmitInput = PlayerCredentials & { word: string };
+
+/** Shape returned by api.joinGame() */
+type JoinResponse = Awaited<ReturnType<typeof api.joinGame>>;
+
+/** Shape returned by api.pollGame() */
+export type PollResponse = Awaited<ReturnType<typeof api.pollGame>>;
+
+/** Shape returned by api.submitWord() */
+type SubmitResponse = Awaited<ReturnType<typeof api.submitWord>>;
+
+/** A single element of round.parts */
+export type RoundPart = NonNullable<PollResponse['round']> extends infer R
+  ? R extends { parts: (infer P)[] }
+    ? P
+    : never
+  : never;
+
+export type Stats = NonNullable<PollResponse['stats']>;
 
 export type PollFailure = { message: string; status?: number };
 
@@ -46,12 +61,26 @@ function errorStatus(error: unknown) {
 
 export { errorMessage as apiError, errorStatus as apiStatus };
 
+// ---------------------------------------------------------------------------
+// useGetConfig — wraps api.getConfig() in a TanStack useQuery
+// ---------------------------------------------------------------------------
+
 export function useGetConfig() {
-  return useGeneratedGetConfig();
+  return useQuery({
+    queryKey: ['config'],
+    queryFn: () => api.getConfig(),
+  });
 }
 
+// ---------------------------------------------------------------------------
+// useJoinGame — wraps api.joinGame() in a TanStack useMutation
+// ---------------------------------------------------------------------------
+
 export function useJoinGame() {
-  const mutation = useGeneratedJoinGame();
+  const mutation = useMutation({
+    mutationKey: ['joinGame'],
+    mutationFn: (credentials: PlayerCredentials) => api.joinGame(credentials),
+  });
   const mutateRef = useRef(mutation.mutate);
   mutateRef.current = mutation.mutate;
 
@@ -60,7 +89,7 @@ export function useJoinGame() {
       credentials: PlayerCredentials,
       handlers?: { onSuccess?: (result: JoinResponse) => void; onError?: (error: unknown) => void },
     ) => {
-      mutateRef.current({ data: credentials }, handlers);
+      mutateRef.current(credentials, handlers);
     },
     [],
   );
@@ -68,14 +97,21 @@ export function useJoinGame() {
   return { join, isPending: mutation.isPending };
 }
 
+// ---------------------------------------------------------------------------
+// useSubmitWord — wraps api.submitWord() in a TanStack useMutation
+// ---------------------------------------------------------------------------
+
 export function useSubmitWord() {
-  const mutation = useGeneratedSubmitWord();
+  const mutation = useMutation({
+    mutationKey: ['submitWord'],
+    mutationFn: (input: SubmitInput) => api.submitWord(input),
+  });
   const mutateRef = useRef(mutation.mutate);
   mutateRef.current = mutation.mutate;
 
   const submit = useCallback(
     (input: SubmitInput, handlers?: { onSuccess?: (result: SubmitResponse) => void }) => {
-      mutateRef.current({ data: input }, handlers);
+      mutateRef.current(input, handlers);
     },
     [],
   );
@@ -88,6 +124,10 @@ export function useSubmitWord() {
     error: mutation.error,
   };
 }
+
+// ---------------------------------------------------------------------------
+// useGamePoll — long-poll loop using api.pollGame()
+// ---------------------------------------------------------------------------
 
 /**
  * Owns the poll loop and its failure state. Credentials are read once on mount
@@ -103,7 +143,6 @@ export function useGamePoll({
   onSessionEnded: () => void;
   intervalMs?: number;
 }) {
-  const pollGame = useGeneratedPollGame();
   const [poll, setPoll] = useState<PollResponse | undefined>();
   const [failure, setFailure] = useState<PollFailure | null>(null);
 
@@ -111,12 +150,9 @@ export function useGamePoll({
   const onSessionEndedRef = useRef(onSessionEnded);
   onSessionEndedRef.current = onSessionEnded;
 
-  // Hold mutateAsync in a ref, not mutate: the loop below is driven off the
-  // awaited promise rather than react-query's per-call callbacks. A mutation
-  // hook keeps one options slot, so any other poll call would replace this
-  // loop's onSettled and the loop would never reschedule.
-  const pollRef = useRef(pollGame.mutateAsync);
-  pollRef.current = pollGame.mutateAsync;
+  // Use a ref for the poll function so the effect closure always calls the
+  // latest version without re-triggering the effect.
+  const pollFnRef = useRef((credentials: PlayerCredentials) => api.pollGame(credentials));
 
   useEffect(() => {
     const credentials = credentialsRef.current;
@@ -132,7 +168,7 @@ export function useGamePoll({
 
     const request = async () => {
       try {
-        const result = await pollRef.current({ data: credentials });
+        const result = await pollFnRef.current(credentials);
         setPoll(result);
         if (!result.ok) {
           setFailure({ message: result.error || 'The game server returned an invalid state.' });
@@ -158,8 +194,8 @@ export function useGamePoll({
   const retry = useCallback(() => {
     const credentials = credentialsRef.current;
     if (!credentials) return;
-    void pollRef
-      .current({ data: credentials })
+    void api
+      .pollGame(credentials)
       .then((result) => {
         setPoll(result);
         if (result.ok) setFailure(null);
@@ -172,7 +208,7 @@ export function useGamePoll({
   const refresh = useCallback(() => {
     const credentials = credentialsRef.current;
     if (!credentials) return;
-    void pollRef.current({ data: credentials }).then(setPoll).catch(() => {});
+    void api.pollGame(credentials).then(setPoll).catch(() => {});
   }, []);
 
   return { poll, failure, retry, refresh, credentials: credentialsRef.current };

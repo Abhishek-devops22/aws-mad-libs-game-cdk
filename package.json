@@ -3,17 +3,32 @@
   "version": "0.0.0",
   "license": "MIT-0",
   "scripts": {
-    "preinstall": "sh -c 'rm -f package-lock.json yarn.lock; case \"$npm_config_user_agent\" in pnpm/*) ;; *) echo \"Use pnpm instead\" >&2; exit 1 ;; esac'",
-    "build": "pnpm run typecheck && pnpm -r --if-present run build",
+    "build": "pnpm -r --if-present run build",
     "typecheck:libs": "tsc --build",
-    "typecheck": "pnpm run typecheck:libs && pnpm -r --filter \"./artifacts/**\" --filter \"./scripts\" --if-present run typecheck"
+    "typecheck": "pnpm -r --filter \"./artifacts/**\" --if-present run typecheck",
+    "sandbox": "tsx aws-blocks/scripts/sandbox.ts",
+    "sandbox:destroy": "tsx -C cdk aws-blocks/scripts/sandbox-destroy.ts",
+    "sandbox:console": "tsx aws-blocks/scripts/console.ts",
+    "deploy": "tsx aws-blocks/scripts/deploy.ts",
+    "destroy": "tsx aws-blocks/scripts/destroy.ts",
+    "dev:server": "tsx watch aws-blocks/scripts/server.ts"
   },
   "private": true,
   "dependencies": {
-    "@replit/connectors-sdk": "^0.4.1"
+    "@replit/connectors-sdk": "^0.4.1",
+    "@aws-blocks/blocks": "*"
   },
   "devDependencies": {
     "prettier": "^3.9.6",
-    "typescript": "~5.9.3"
-  }
+    "typescript": "~5.9.3",
+    "aws-cdk-lib": "^2.257.0",
+    "constructs": "^10.6.0",
+    "tsx": "^4.7.0",
+    "esbuild": "^0.27.1",
+    "@types/node": "^20.0.0",
+    "@modelcontextprotocol/sdk": "^1.25.2"
+  },
+  "workspaces": [
+    "aws-blocks"
+  ]
 }

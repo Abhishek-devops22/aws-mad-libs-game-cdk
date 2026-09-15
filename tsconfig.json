@@ -1,13 +1,11 @@
 {
   "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "types": ["node"],
+    "noEmit": true
+  },
   "compileOnSave": false,
+  "include": ["aws-blocks/**/*"],
   "files": [],
-  "references": [
-    {
-      "path": "./lib/api-client-react"
-    },
-    {
-      "path": "./lib/api-zod"
-    }
-  ]
+  "references": []
 }
