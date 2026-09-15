@@ -33,12 +33,11 @@ minimumReleaseAgeExclude:
   # this setting guards against does not apply to our own packages.
   - '@replit/*'
   - stripe-replit-sync
+  - '@aws-blocks/*'
 
 packages:
-  - artifacts/*
-  - lib/*
-  - lib/integrations/*
-  - scripts
+  - artifacts/madlibs-client
+  - aws-blocks
 
 catalog:
   '@replit/vite-plugin-cartographer': ^0.5.21

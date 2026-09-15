@@ -52,3 +52,9 @@ Thumbs.db
 # Replit conversation artifacts
 .conversation/
 replit.md
+
+# AWS Blocks
+.blocks-sandbox
+cdk.out/
+aws-blocks/blocks.spec.json
+.bb-data/
